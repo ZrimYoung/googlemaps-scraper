@@ -17,7 +17,7 @@ from selenium.webdriver.common.action_chains import ActionChains
 from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.support import expected_conditions as EC
-from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support.wait import WebDriverWait
 from webdriver_manager.chrome import ChromeDriverManager
 
 GM_WEBPAGE = 'https://www.google.com/maps/'
@@ -117,7 +117,7 @@ class GoogleMapsScraper:
                     'name': div_place['aria-label']
                 }
 
-                df_places = df_places.append(place_info, ignore_index=True)
+                df_places = pd.concat([df_places, pd.DataFrame([place_info])], ignore_index=True)
 
             # TODO: implement click to handle > 20 places
 
@@ -237,10 +237,23 @@ class GoogleMapsScraper:
 
         place = {}
 
+        # 尝试新的标题选择器
         try:
-            place['name'] = response.find('h1', class_='DUwDvf fontHeadlineLarge').text.strip()
+            place['name'] = response.find('h1', class_='DUwDvf lfPIob').text.strip()
         except Exception as e:
-            place['name'] = None
+            # 如果新选择器失败，尝试旧的选择器
+            try:
+                place['name'] = response.find('h1', class_='DUwDvf fontHeadlineLarge').text.strip()
+            except Exception:
+                # 如果都失败，尝试从标题中提取
+                try:
+                    title_text = response.find('title').text
+                    if title_text and 'Google Maps' in title_text:
+                        place['name'] = title_text.replace(' - Google Maps', '').strip()
+                    else:
+                        place['name'] = None
+                except Exception:
+                    place['name'] = None
 
         try:
             place['overall_rating'] = float(response.find('div', class_='F7nice ').find('span', class_='ceNzKf')['aria-label'].split(' ')[1])
@@ -260,33 +273,73 @@ class GoogleMapsScraper:
         try:
             place['category'] = response.find('button', jsaction='pane.rating.category').text.strip()
         except Exception as e:
-            place['category'] = None
+            # 尝试新的类别选择器
+            try:
+                category_div = response.find('div', class_='Q5g20')
+                if category_div:
+                    place['category'] = category_div.text.strip()
+                else:
+                    place['category'] = None
+            except Exception:
+                place['category'] = None
 
         try:
             place['description'] = response.find('div', class_='PYvSYb').text.strip()
         except Exception as e:
             place['description'] = None
 
+        # 尝试从不同的位置获取地址信息
         b_list = response.find_all('div', class_='Io6YTe fontBodyMedium')
-        try:
-            place['address'] = b_list[0].text
-        except Exception as e:
-            place['address'] = None
-
-        try:
-            place['website'] = b_list[1].text
-        except Exception as e:
-            place['website'] = None
-
-        try:
-            place['phone_number'] = b_list[2].text
-        except Exception as e:
-            place['phone_number'] = None
-    
-        try:
-            place['plus_code'] = b_list[3].text
-        except Exception as e:
-            place['plus_code'] = None
+        
+        # 如果找不到，尝试其他选择器
+        if not b_list:
+            b_list = response.find_all('div', class_='rogA2c')
+            if not b_list:
+                b_list = response.find_all('div', {'data-item-id': 'address'})
+        
+        # 初始化所有字段
+        place['address'] = None
+        place['website'] = None
+        place['phone_number'] = None
+        place['plus_code'] = None
+        
+        # 处理找到的信息元素
+        for i, item in enumerate(b_list):
+            if item and item.text:
+                text = item.text.strip()
+                
+                # 判断是Plus Code（通常格式为XXXX+XX 城市名）
+                if '+' in text and len(text) <= 30 and text.count('+') == 1:
+                    # Plus Code通常是数字字母+数字字母的格式
+                    parts = text.split('+')
+                    if len(parts) == 2 and all(c.isalnum() for c in parts[0][-4:]) and all(c.isalnum() for c in parts[1][:2]):
+                        place['plus_code'] = text
+                        continue
+                
+                # 判断是网站（包含http或www或.com等）
+                if any(x in text.lower() for x in ['http', 'www.', '.com', '.org', '.net']):
+                    place['website'] = text
+                # 判断是电话号码（包含数字和电话符号，但排除Plus Code）
+                elif any(x in text for x in ['+', '(', ')', '-']) and any(c.isdigit() for c in text) and not ('+' in text and len(text) <= 30):
+                    place['phone_number'] = text
+                # 否则认为是地址
+                else:
+                    if not place['address']:  # 只取第一个地址
+                        place['address'] = text
+        
+        # 如果通过上述方式没有获取到地址，尝试从meta标签获取
+        if not place['address']:
+            try:
+                address_meta = response.find('meta', attrs={'itemprop': 'name'})
+                if address_meta:
+                    address_content = address_meta.get('content', '')
+                    # 从完整地址中提取地址部分
+                    if '·' in address_content:
+                        place['address'] = address_content.split('·')[1].strip()
+                    else:
+                        place['address'] = address_content
+            except Exception:
+                pass
 
         try:
             place['opening_hours'] = response.find('div', class_='t39EBf GUrTXd')['aria-label'].replace('\u202f', ' ')
@@ -295,9 +348,30 @@ class GoogleMapsScraper:
 
         place['url'] = url
 
-        lat, long, z = url.split('/')[6].split(',')
-        place['lat'] = lat[1:]
-        place['long'] = long
+        # 从页面源码meta标签中提取经纬度
+        try:
+            lat_tag = response.find('meta', itemprop='latitude')
+            long_tag = response.find('meta', itemprop='longitude')
+            place['lat'] = lat_tag['content'] if lat_tag else None
+            place['long'] = long_tag['content'] if long_tag else None
+        except Exception:
+            place['lat'] = None
+            place['long'] = None
+
+        # 如果meta标签中没有经纬度，尝试从JavaScript数据中提取
+        if not place['lat'] or not place['long']:
+            try:
+                import re
+                page_text = str(response)
+                # 使用正则表达式搜索经纬度模式
+                coord_pattern = r'\[3,([0-9.-]+),([0-9.-]+)\]'
+                matches = re.findall(coord_pattern, page_text)
+                if matches:
+                    # 取第一个匹配的坐标对
+                    place['long'] = matches[0][0]  # 经度在前
+                    place['lat'] = matches[0][1]   # 纬度在后
+            except Exception:
+                pass
 
         return place
 

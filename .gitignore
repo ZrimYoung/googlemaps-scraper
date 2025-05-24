@@ -113,3 +113,16 @@ test/
 !urls.txt
 !urls_places.txt
 chromedriver*
+
+
+# 输入和输出文件夹
+input/
+output/
+data/
+
+
+# 日志文件
+*.log
+
+# 开发工具
+.idea/
