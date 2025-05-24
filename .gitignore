@@ -119,6 +119,9 @@ chromedriver*
 input/
 output/
 data/
+input/*
+output/*
+data/*
 
 
 # 日志文件
